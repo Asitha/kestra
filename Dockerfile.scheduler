@@ -1,0 +1,86 @@
+# Build stage - compile Kestra from source
+FROM eclipse-temurin:21-jdk-jammy AS builder
+
+WORKDIR /build
+
+# Copy gradle wrapper and configuration files
+COPY gradlew ./
+COPY gradle ./gradle
+COPY gradle.properties ./
+COPY settings.gradle ./
+COPY build.gradle ./
+
+# Create stub UI module to satisfy Gradle configuration (but skip actual UI build)
+# The shadowJar task depends on ui:assembleFrontend, so we create a no-op task
+RUN mkdir -p ui/src/main/resources && \
+    mkdir -p webserver/src/main/resources/ui && \
+    printf 'plugins {\n    id "java"\n}\n\ntasks.register("assembleFrontend") {\n    description = "Stub task - no UI build"\n    doLast {\n        file("../webserver/src/main/resources/ui").mkdirs()\n    }\n}\n' > ui/build.gradle
+
+# Download dependencies first (cached layer if dependencies don't change)
+# This creates a separate layer that can be cached
+RUN --mount=type=cache,target=/root/.gradle \
+    --mount=type=bind,source=.git,target=/build/.git,readonly \
+    ./gradlew dependencies --no-daemon || true
+
+# Copy source code (order matters - dependencies first)
+COPY platform ./platform
+COPY model ./model
+COPY processor ./processor
+COPY core ./core
+COPY tests ./tests
+COPY storage-local ./storage-local
+COPY runner-memory ./runner-memory
+COPY repository-memory ./repository-memory
+COPY jdbc ./jdbc
+COPY jdbc-h2 ./jdbc-h2
+COPY jdbc-mysql ./jdbc-mysql
+COPY jdbc-postgres ./jdbc-postgres
+COPY script ./script
+COPY executor ./executor
+COPY scheduler ./scheduler
+COPY worker ./worker
+COPY webserver ./webserver
+COPY cli ./cli
+COPY gradle/jar ./gradle/jar
+
+# Build the executable jar (UI module is stubbed out, so no Node.js required)
+RUN --mount=type=cache,target=/root/.gradle \
+    --mount=type=cache,target=/build/.gradle \
+    --mount=type=bind,source=.git,target=/build/.git,readonly \
+    ./gradlew writeExecutableJar --no-daemon --parallel -x test
+
+# Runtime stage - minimal image for running scheduler
+FROM eclipse-temurin:21-jre-jammy
+
+ARG KESTRA_PLUGINS=""
+ARG APT_PACKAGES=""
+ARG PYTHON_LIBRARIES=""
+
+WORKDIR /app
+
+RUN groupadd kestra && \
+    useradd -m -g kestra kestra
+
+# Copy docker configuration files
+COPY docker /
+
+# Copy built executable from builder stage
+COPY --from=builder --chown=kestra:kestra /build/build/executable/kestra-* /app/kestra
+
+# Install dependencies and plugins
+RUN apt-get update -y && \
+    apt-get upgrade -y && \
+    if [ -n "${APT_PACKAGES}" ]; then apt-get install -y --no-install-recommends ${APT_PACKAGES}; fi && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/tmp/* /tmp/* && \
+    curl -LsSf https://astral.sh/uv/0.6.17/install.sh | sh && mv /root/.local/bin/uv /bin && mv /root/.local/bin/uvx /bin && \
+    if [ -n "${KESTRA_PLUGINS}" ]; then /app/kestra plugins install ${KESTRA_PLUGINS} && rm -rf /tmp/*; fi && \
+    if [ -n "${PYTHON_LIBRARIES}" ]; then uv pip install --system ${PYTHON_LIBRARIES}; fi && \
+    chown -R kestra:kestra /app
+
+USER kestra
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+
+# Default command runs the scheduler
+CMD ["server", "scheduler"]
