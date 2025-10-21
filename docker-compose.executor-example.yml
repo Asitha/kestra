@@ -1,0 +1,58 @@
+volumes:
+  postgres-data:
+    driver: local
+
+services:
+  postgres:
+    image: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: kestra
+      POSTGRES_USER: kestra
+      POSTGRES_PASSWORD: k3str4
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  executor:
+    build:
+      context: .
+      dockerfile: Dockerfile.executor
+      args:
+        # Optional: Install additional APT packages
+        APT_PACKAGES: "python3 python-is-python3 python3-pip curl"
+        # Optional: Install Python libraries
+        PYTHON_LIBRARIES: "kestra"
+        # Optional: Install Kestra plugins
+        # KESTRA_PLUGINS: "io.kestra.plugin.aws io.kestra.plugin.gcp"
+    environment:
+      KESTRA_CONFIGURATION: |
+        datasources:
+          postgres:
+            url: jdbc:postgresql://postgres:5432/kestra
+            driverClassName: org.postgresql.Driver
+            username: kestra
+            password: k3str4
+        kestra:
+          repository:
+            type: postgres
+          queue:
+            type: postgres
+          # Executor-specific configuration
+          # executor:
+          #   thread-count: 128
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+# Note: This is an example showing only the executor component.
+# In a distributed setup, you would also need:
+# - scheduler (using Dockerfile.scheduler)
+# - worker (using Dockerfile.worker)
+# - webserver (using Dockerfile.webserver)
