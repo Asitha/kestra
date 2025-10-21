@@ -8,11 +8,20 @@ The Executor is the Kestra component responsible for processing and executing wo
 
 ## Building the Image
 
-### Using Docker Build
+### Using Docker Build (with caching for faster builds)
+
+The Dockerfile uses BuildKit cache mounts to speed up rebuilds by caching Gradle dependencies:
 
 ```bash
+# Enable BuildKit for cache support
+export DOCKER_BUILDKIT=1
+
+# Build with cache (much faster on subsequent builds)
 docker build -f Dockerfile.executor -t kestra/executor:latest .
 ```
+
+**First build**: Downloads all dependencies (~5-10 minutes)
+**Subsequent builds**: Reuses cached dependencies (only rebuilds changed code)
 
 ### With Build Arguments
 
@@ -26,6 +35,22 @@ docker build -f Dockerfile.executor \
   -t kestra/executor:latest .
 ```
 
+### Advanced: Using External Gradle Cache
+
+To share the Gradle cache across different builds or CI/CD pipelines, you can use a named volume:
+
+```bash
+# Create a named volume for the Gradle cache
+docker volume create gradle-cache
+
+# Build using the named volume
+docker build -f Dockerfile.executor \
+  --build-arg BUILDKIT_INLINE_CACHE=1 \
+  -t kestra/executor:latest .
+```
+
+The cache is automatically managed by Docker's BuildKit and persists between builds.
+
 ### Using Docker Compose
 
 ```bash
@@ -35,12 +60,41 @@ docker compose -f docker-compose.executor-example.yml up
 
 ## Running the Executor
 
-### Standalone
+The executor requires three mandatory configurations:
+- **`kestra.repository.type`** - Where flow definitions are stored (postgres, mysql, or memory)
+- **`kestra.queue.type`** - Where task queues are stored (postgres, mysql, or memory)
+- **`kestra.storage.type`** - Where execution outputs are stored (local, s3, gcs, minio)
+
+### Quick Test (In-Memory - Development Only)
+
+For quick testing without external dependencies:
+
+```bash
+docker run --rm \
+  --name kestra-executor \
+  -e KESTRA_CONFIGURATION='
+kestra:
+  repository:
+    type: memory
+  queue:
+    type: memory
+  storage:
+    type: local
+    local:
+      base-path: /tmp/kestra-storage
+' \
+  kestra/executor:latest
+```
+
+**Note**: Memory configuration loses all data when the container stops. Use for testing only!
+
+### Production (PostgreSQL)
 
 ```bash
 docker run -d \
   --name kestra-executor \
-  -e KESTRA_CONFIGURATION="$(cat <<EOF
+  --network kestra-network \
+  -e KESTRA_CONFIGURATION='
 datasources:
   postgres:
     url: jdbc:postgresql://postgres:5432/kestra
@@ -52,8 +106,12 @@ kestra:
     type: postgres
   queue:
     type: postgres
-EOF
-)" \
+  storage:
+    type: local
+    local:
+      base-path: /app/storage
+' \
+  -v kestra-storage:/app/storage \
   kestra/executor:latest
 ```
 

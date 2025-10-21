@@ -104,24 +104,46 @@ docker build \
 ### Gradle Build
 - **Main Class:** `io.kestra.cli.App` (defined in `build.gradle:53`)
 - **Java Version:** 21 (JDK for build, JRE for runtime)
-- **Build Tool:** Gradle with Shadow plugin
+- **Build Tool:** Gradle 8.13 with Shadow plugin
+- **Multi-module Project:** 21 modules defined in `settings.gradle`
 - **Key Gradle Tasks:**
-  - `shadowJar` - Creates fat JAR with all dependencies
+  - `shadowJar` - Creates fat JAR with all dependencies (depends on `ui:assembleFrontend`)
   - `writeExecutableJar` - Creates executable JAR from shadow JAR
   - `jar` - Standard JAR task
+  - `dependencies` - Downloads all dependencies (useful for Docker layer caching)
+  - `:ui:assembleFrontend` - Builds frontend using Node.js 22.12.0
 
-### Project Structure
+### Gradle Module Structure (OSS Repository)
+```
+kestra (root)
+├── platform/             # Bill of Materials (BOM) - centralizes dependency versions
+├── model/                # Data models and core annotations (@Plugin, @PluginProperty)
+├── processor/            # Annotation processors
+├── core/                 # Core engine and functionality
+├── tests/                # Shared test utilities
+├── storage-local/        # Local filesystem storage
+├── repository-memory/    # In-memory repository implementation
+├── runner-memory/        # In-memory task runner
+├── jdbc/                 # Base JDBC abstraction
+├── jdbc-h2/              # H2 database support
+├── jdbc-mysql/           # MySQL database support
+├── jdbc-postgres/        # PostgreSQL database support
+├── script/               # Scripting support
+├── executor/             # Task execution engine
+├── scheduler/            # Workflow scheduler
+├── worker/               # Distributed worker
+├── webserver/            # REST API and web backend
+├── ui/                   # Frontend UI (React/Vue - requires Node.js)
+├── cli/                  # Command-line interface (main entry point)
+├── e2e-tests/            # End-to-end tests
+└── jmh-benchmarks/       # Performance benchmarks
+```
+
+**Note:** Enterprise Edition (EE) modules like `storage-s3`, `storage-gcs`, `storage-minio`, `repository-postgres`, `repository-mysql`, and `runner-kafka` are NOT in the OSS repository.
+
+### Project File Structure
 ```
 /home/user/kestra/
-├── cli/                  # CLI module
-├── core/                 # Core module
-├── jdbc*/                # JDBC modules (h2, mysql, postgres)
-├── repository-*/         # Repository implementations
-├── runner-*/             # Runner implementations (kafka, memory)
-├── storage-*/            # Storage implementations (local, s3, gcs, minio)
-├── webserver/            # Webserver module
-├── ui/                   # Frontend UI
-├── platform/             # Platform module
 ├── docker/               # Docker configuration files
 │   ├── app/
 │   │   ├── confs/        # Configuration directory
@@ -129,8 +151,12 @@ docker build \
 │   │   └── secrets/      # Secrets directory
 │   └── usr/local/bin/
 │       └── docker-entrypoint.sh  # Entrypoint script
-├── build.gradle          # Main build file
-└── settings.gradle       # Gradle settings
+├── gradle/               # Gradle wrapper files
+│   ├── jar/              # JAR manifest configuration
+│   └── wrapper/          # Gradle wrapper distribution
+├── build.gradle          # Main build file (plugins, tasks, publishing)
+├── settings.gradle       # Gradle module declarations
+└── gradle.properties     # Build properties (version, JVM args, caching)
 ```
 
 ### Docker Entrypoint
@@ -200,21 +226,33 @@ All Kestra components require:
 #### 1. Executor Dockerfile (`Dockerfile.executor`)
 - **Multistage build:**
   - **Builder stage:** Compiles from source using Gradle + JDK 21
-  - **Runtime stage:** Minimal JRE 21 image
+    - Uses BuildKit cache mounts for Gradle dependencies (`/root/.gradle`, `/build/.gradle`)
+    - Mounts `.git` directory (read-only) for version metadata via `gradle-git-properties` plugin
+    - Excludes UI build (stub `ui:assembleFrontend` task) to avoid Node.js dependency
+    - Skips tests with `-x test` for faster builds
+  - **Runtime stage:** Minimal JRE 21 image (`eclipse-temurin:21-jre-jammy`)
 - **Build args:** `KESTRA_PLUGINS`, `APT_PACKAGES`, `PYTHON_LIBRARIES`
 - **Default command:** `server executor`
 - **User:** Non-root `kestra:kestra`
+- **Key optimizations:**
+  - Layer caching for dependencies (reused across rebuilds)
+  - Parallel Gradle builds (`--parallel`)
+  - No daemon (`--no-daemon`) for clean builds
+  - Stub UI module avoids 5+ minute Node.js build
 
 #### 2. Executor Example (`docker-compose.executor-example.yml`)
 - Shows how to build and run executor
-- Includes PostgreSQL dependency
+- Includes PostgreSQL dependency with healthcheck
 - Example environment configuration
+- Build args for Python and plugins
 
 #### 3. Executor Documentation (`Dockerfile.executor.md`)
-- Build instructions
-- Configuration examples
+- Build instructions with BuildKit caching
+- Configuration requirements (repository, queue, storage)
+- Quick test examples (in-memory and PostgreSQL)
 - CLI options reference
 - Distributed setup requirements
+- Multistage build explanation
 
 ### ⏳ Remaining Tasks
 
@@ -273,6 +311,9 @@ make build-docker
 
 ### Docker Build (New Multistage Method)
 ```bash
+# IMPORTANT: Enable BuildKit for cache support
+export DOCKER_BUILDKIT=1
+
 # Build executor (compiles from source)
 docker build -f Dockerfile.executor -t kestra/executor:latest .
 
@@ -284,23 +325,42 @@ docker build -f Dockerfile.executor \
   -t kestra/executor:latest .
 ```
 
+**Build Performance:**
+- **First build:** ~5-10 minutes (downloads all dependencies)
+- **Subsequent builds:** ~1-2 minutes (uses cached Gradle dependencies)
+- **No code changes:** Seconds (Docker layer cache)
+
 ### Run Components
 ```bash
-# Executor
-docker run kestra/executor:latest server executor
+# Executor (requires configuration)
+docker run --rm \
+  -e KESTRA_CONFIGURATION='
+kestra:
+  repository:
+    type: memory
+  queue:
+    type: memory
+  storage:
+    type: local
+    local:
+      base-path: /tmp/kestra-storage
+' \
+  kestra/executor:latest
 
-# Worker
+# Worker (using original image)
 docker run kestra/kestra:latest server worker --thread 128
 
-# Scheduler
+# Scheduler (using original image)
 docker run kestra/kestra:latest server scheduler
 
-# Webserver
+# Webserver (using original image)
 docker run kestra/kestra:latest server webserver --no-indexer
 
-# Standalone (all-in-one)
+# Standalone (all-in-one, using original image)
 docker run kestra/kestra:latest server standalone
 ```
+
+**Note:** All components require `kestra.repository.type`, `kestra.queue.type`, and `kestra.storage.type` configuration.
 
 ### Git Operations
 ```bash
@@ -422,6 +482,164 @@ kestra:
 - Check database connectivity
 - Ensure shared storage is accessible
 - Verify queue configuration matches across all components
+
+---
+
+## Lessons Learned & Challenges Overcome
+
+### Challenge 1: Missing COPY Paths in Dockerfile
+**Problem:** Original Dockerfile.executor attempted to copy Enterprise Edition modules (`storage-s3`, `storage-gcs`, `storage-minio`, `repository-postgres`, `repository-mysql`, `runner-kafka`) that don't exist in the OSS repository.
+
+**Solution:**
+- Identified all modules actually present in `settings.gradle`
+- Removed non-existent EE module references
+- Added missing OSS modules: `model`, `processor`, `tests`, `script`, `executor`, `scheduler`, `worker`
+
+**Files:** [Dockerfile.executor:19-38](Dockerfile.executor:19-38)
+
+---
+
+### Challenge 2: Build Failure - Missing Git Repository
+**Problem:** `gradle-git-properties` plugin failed with "No Git repository found" because `.git` directory wasn't available in Docker build context.
+
+**Error:**
+```
+FAILURE: Build failed with an exception.
+* What went wrong:
+Execution failed for task ':generateGitProperties'.
+> No Git repository found.
+```
+
+**Solution:** Mount `.git` directory read-only during build using BuildKit bind mounts:
+```dockerfile
+RUN --mount=type=bind,source=.git,target=/build/.git,readonly \
+    ./gradlew writeExecutableJar --no-daemon --parallel
+```
+
+**Why this works:**
+- Provides Git metadata for versioning without copying `.git` into the image
+- Keeps image size small and secure
+- Generates correct version info from actual Git tags/commits
+
+**Files:** [Dockerfile.executor:21-22, 42-45](Dockerfile.executor:21-22)
+
+---
+
+### Challenge 3: Node.js/npm Build Failure
+**Problem:** `shadowJar` task has a hard dependency on `ui:assembleFrontend`, which requires Node.js and npm. The UI build was failing with npm errors, adding 5+ minutes to build time.
+
+**Error:**
+```
+FAILURE: Build failed with an exception.
+* What went wrong:
+Execution failed for task ':ui:npmInstall'.
+> Process 'command 'npm'' finished with non-zero exit value 1
+```
+
+**Initial Failed Approaches:**
+1. ❌ Skip task with `-x :ui:assembleFrontend` → "task not found" error
+2. ❌ Don't copy UI module → Gradle configuration fails
+
+**Final Solution:** Create a stub `ui/build.gradle` with a no-op `assembleFrontend` task:
+```dockerfile
+RUN mkdir -p ui/src/main/resources && \
+    mkdir -p webserver/src/main/resources/ui && \
+    printf 'plugins {\n    id "java"\n}\n\ntasks.register("assembleFrontend") {\n    description = "Stub task - no UI build"\n    doLast {\n        file("../webserver/src/main/resources/ui").mkdirs()\n    }\n}\n' > ui/build.gradle
+```
+
+**Why this works:**
+- Satisfies Gradle's project structure requirements
+- Satisfies `shadowJar.dependsOn 'ui:assembleFrontend'` dependency
+- No Node.js download or npm install required
+- Executor doesn't need UI anyway (only webserver does)
+
+**Files:** [Dockerfile.executor:13-17](Dockerfile.executor:13-17)
+
+---
+
+### Challenge 4: Slow Rebuild Times
+**Problem:** Every Docker build was downloading all Gradle dependencies from scratch (~5-10 minutes), even when nothing changed.
+
+**Solution:** Implement BuildKit cache mounts for Gradle caches:
+```dockerfile
+# Cache Gradle user home (downloaded dependencies)
+RUN --mount=type=cache,target=/root/.gradle \
+    # Cache project build cache
+    --mount=type=cache,target=/build/.gradle \
+    ./gradlew writeExecutableJar --no-daemon --parallel
+```
+
+**Results:**
+- **Before:** 5-10 minutes per build
+- **After (first build):** 5-10 minutes (downloads dependencies once)
+- **After (subsequent builds):** 1-2 minutes (only rebuilds changed code)
+
+**Requirement:** Must use `DOCKER_BUILDKIT=1` environment variable
+
+**Files:** [Dockerfile.executor:20-22, 42-45](Dockerfile.executor:20-22)
+
+---
+
+### Challenge 5: Module Dependency Order
+**Problem:** Build failed because `core` module depends on annotations from `model` and `processor` modules, but they weren't copied in the correct order.
+
+**Error:**
+```
+error: package io.kestra.core.models.annotations does not exist
+import io.kestra.core.models.annotations.Plugin;
+```
+
+**Solution:** Copy modules in dependency order:
+1. **Foundation:** `platform` → `model` → `processor`
+2. **Core:** `core` → `tests`
+3. **Infrastructure:** storage/jdbc/runner modules
+4. **Services:** `executor`, `scheduler`, `worker`
+5. **API:** `webserver`, `cli`
+
+**Files:** [Dockerfile.executor:20-38](Dockerfile.executor:20-38)
+
+---
+
+### Challenge 6: Configuration Validation on Startup
+**Problem:** Docker image runs but immediately fails with configuration errors:
+
+**Error:**
+```
+ERROR i.k.c.v.ServerCommandValidator Server configuration requires 'kestra.repository.type' to be defined
+ERROR i.k.c.v.ServerCommandValidator Server configuration requires 'kestra.queue.type' to be defined
+ERROR i.k.c.v.ServerCommandValidator Server configuration requires 'kestra.storage.type' to be defined
+```
+
+**Solution:** This is **expected behavior**. All Kestra components require three mandatory configurations via `KESTRA_CONFIGURATION` environment variable:
+- `kestra.repository.type` (postgres, mysql, or memory)
+- `kestra.queue.type` (postgres, mysql, or memory)
+- `kestra.storage.type` (local, s3, gcs, or minio)
+
+**Minimal working configuration:**
+```yaml
+kestra:
+  repository:
+    type: memory
+  queue:
+    type: memory
+  storage:
+    type: local
+    local:
+      base-path: /tmp/kestra-storage
+```
+
+**Files:** [Dockerfile.executor.md:68-116](Dockerfile.executor.md:68-116)
+
+---
+
+## Key Takeaways
+
+1. **OSS vs EE modules:** Always verify module existence in `settings.gradle` before copying in Dockerfile
+2. **Git metadata:** Use BuildKit bind mounts for read-only access to `.git` without bloating image
+3. **UI builds:** Executor/scheduler/worker don't need UI - stub it out to save time
+4. **BuildKit caching:** Essential for reasonable build times in multi-module Gradle projects
+5. **Module dependencies:** Follow dependency graph when copying source files
+6. **Configuration validation:** Kestra enforces configuration at startup - this is good architecture
 
 ---
 

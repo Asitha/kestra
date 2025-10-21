@@ -10,28 +10,44 @@ COPY gradle.properties ./
 COPY settings.gradle ./
 COPY build.gradle ./
 
-# Copy source code
-COPY cli ./cli
+# Create stub UI module to satisfy Gradle configuration (but skip actual UI build)
+# The shadowJar task depends on ui:assembleFrontend, so we create a no-op task
+RUN mkdir -p ui/src/main/resources && \
+    mkdir -p webserver/src/main/resources/ui && \
+    printf 'plugins {\n    id "java"\n}\n\ntasks.register("assembleFrontend") {\n    description = "Stub task - no UI build"\n    doLast {\n        file("../webserver/src/main/resources/ui").mkdirs()\n    }\n}\n' > ui/build.gradle
+
+# Download dependencies first (cached layer if dependencies don't change)
+# This creates a separate layer that can be cached
+RUN --mount=type=cache,target=/root/.gradle \
+    --mount=type=bind,source=.git,target=/build/.git,readonly \
+    ./gradlew dependencies --no-daemon || true
+
+# Copy source code (order matters - dependencies first)
+COPY platform ./platform
+COPY model ./model
+COPY processor ./processor
 COPY core ./core
+COPY tests ./tests
+COPY storage-local ./storage-local
+COPY runner-memory ./runner-memory
+COPY repository-memory ./repository-memory
 COPY jdbc ./jdbc
 COPY jdbc-h2 ./jdbc-h2
 COPY jdbc-mysql ./jdbc-mysql
 COPY jdbc-postgres ./jdbc-postgres
-COPY repository-postgres ./repository-postgres
-COPY repository-mysql ./repository-mysql
-COPY runner-kafka ./runner-kafka
-COPY runner-memory ./runner-memory
-COPY storage-gcs ./storage-gcs
-COPY storage-local ./storage-local
-COPY storage-minio ./storage-minio
-COPY storage-s3 ./storage-s3
+COPY script ./script
+COPY executor ./executor
+COPY scheduler ./scheduler
+COPY worker ./worker
 COPY webserver ./webserver
-COPY ui ./ui
-COPY platform ./platform
+COPY cli ./cli
 COPY gradle/jar ./gradle/jar
 
-# Build the executable jar
-RUN ./gradlew writeExecutableJar --no-daemon --parallel
+# Build the executable jar (UI module is stubbed out, so no Node.js required)
+RUN --mount=type=cache,target=/root/.gradle \
+    --mount=type=cache,target=/build/.gradle \
+    --mount=type=bind,source=.git,target=/build/.git,readonly \
+    ./gradlew writeExecutableJar --no-daemon --parallel -x test
 
 # Runtime stage - minimal image for running executor
 FROM eclipse-temurin:21-jre-jammy
