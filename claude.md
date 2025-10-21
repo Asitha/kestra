@@ -29,7 +29,7 @@ Kestra has 4 main server components that can run separately in distributed mode:
   - `--start-executors` - Start specific Kafka Stream executors (Kafka queue only)
   - `--not-start-executors` - Don't start specific executors (Kafka queue only)
 
-### 2. **Worker** (⏳ TODO)
+### 2. **Worker** (✅ COMPLETED)
 - **Command:** `server worker`
 - **Java Class:** `io.kestra.cli.commands.servers.WorkerCommand`
 - **Location:** `/home/user/kestra/cli/src/main/java/io/kestra/cli/commands/servers/WorkerCommand.java`
@@ -38,7 +38,7 @@ Kestra has 4 main server components that can run separately in distributed mode:
   - `-t, --thread` - Max number of worker threads (default: 8 × CPU cores)
   - `-g, --worker-group` - Worker group key (must match `[a-zA-Z0-9_-]+`) (EE only)
 
-### 3. **Scheduler** (⏳ TODO)
+### 3. **Scheduler** (✅ COMPLETED)
 - **Command:** `server scheduler`
 - **Java Class:** `io.kestra.cli.commands.servers.SchedulerCommand`
 - **Location:** `/home/user/kestra/cli/src/main/java/io/kestra/cli/commands/servers/SchedulerCommand.java`
@@ -254,13 +254,78 @@ All Kestra components require:
 - Distributed setup requirements
 - Multistage build explanation
 
+#### 4. Worker Dockerfile (`Dockerfile.worker`)
+- **Multistage build:**
+  - **Builder stage:** Same optimizations as executor
+    - BuildKit cache mounts for Gradle dependencies
+    - Mounted `.git` for versioning
+    - Stubbed UI module (no Node.js)
+    - Skips tests for faster builds
+  - **Runtime stage:** Minimal JRE 21 image
+- **Build args:** `KESTRA_PLUGINS`, `APT_PACKAGES`, `PYTHON_LIBRARIES`
+- **Default command:** `server worker` (default thread count: 8 × CPU cores)
+- **User:** Non-root `kestra:kestra`
+- **Key features:**
+  - Configurable thread count via `--thread` flag
+  - Worker group support (EE only) via `--worker-group` flag
+  - Horizontal scaling support
+
+#### 5. Worker Example (`docker-compose.worker-example.yml`)
+- Shows how to build and run worker with executor
+- Includes PostgreSQL dependency with healthcheck
+- Example environment configuration
+- Thread count and worker group examples in comments
+- Shared storage volume between worker and executor
+
+#### 6. Worker Documentation (`Dockerfile.worker.md`)
+- Build instructions with BuildKit caching
+- Configuration requirements (repository, queue, storage)
+- Quick test examples (in-memory and PostgreSQL)
+- Thread count and worker group configuration
+- Scaling examples (Docker Compose and Kubernetes)
+- Component interaction diagram
+- Resource requirements and best practices
+- Troubleshooting guide
+
+#### 7. Scheduler Dockerfile (`Dockerfile.scheduler`)
+- **Multistage build:**
+  - **Builder stage:** Same optimizations as executor/worker
+    - BuildKit cache mounts for Gradle dependencies
+    - Mounted `.git` for versioning
+    - Stubbed UI module (no Node.js)
+    - Skips tests for faster builds
+  - **Runtime stage:** Minimal JRE 21 image
+- **Build args:** `KESTRA_PLUGINS`, `APT_PACKAGES`, `PYTHON_LIBRARIES`
+- **Default command:** `server scheduler`
+- **User:** Non-root `kestra:kestra`
+- **Key features:**
+  - No CLI options (configured via environment only)
+  - Supports single instance or HA with leader election
+  - Lightweight (1-2 CPU cores, 1-2 GB RAM typical)
+
+#### 8. Scheduler Example (`docker-compose.scheduler-example.yml`)
+- Shows complete distributed setup: scheduler + executor + worker
+- Includes PostgreSQL dependency with healthcheck
+- Example environment configuration
+- Shared storage volume across all components
+- Proper startup order with dependencies
+
+#### 9. Scheduler Documentation (`Dockerfile.scheduler.md`)
+- Build instructions with BuildKit caching
+- Configuration requirements (repository, queue, storage)
+- Quick test examples (in-memory and PostgreSQL)
+- Scheduler behavior and trigger types
+- Component interaction diagram
+- Single instance vs HA setup
+- Resource requirements and best practices
+- Common trigger examples
+- Troubleshooting guide
+
 ### ⏳ Remaining Tasks
 
-1. **Dockerfile.worker** - Worker component
-2. **Dockerfile.scheduler** - Scheduler component
-3. **Dockerfile.webserver** - Webserver/API component
-4. **Complete docker-compose example** - All components together in distributed setup
-5. **Optional:** Update Makefile with new build targets
+1. **Dockerfile.webserver** - Webserver/API component
+3. **Complete docker-compose example** - All components together in distributed setup
+4. **Optional:** Update Makefile with new build targets
 
 ---
 
@@ -280,9 +345,13 @@ All Kestra components require:
 |------|---------|
 | `/home/user/kestra/Dockerfile` | Original single-stage Dockerfile |
 | `/home/user/kestra/Dockerfile.executor` | ✅ Executor multistage Dockerfile |
+| `/home/user/kestra/Dockerfile.worker` | ✅ Worker multistage Dockerfile |
+| `/home/user/kestra/Dockerfile.scheduler` | ✅ Scheduler multistage Dockerfile |
 | `/home/user/kestra/docker-compose.yml` | Standard docker-compose |
 | `/home/user/kestra/docker-compose-dind.yml` | Docker-in-Docker setup |
 | `/home/user/kestra/docker-compose.executor-example.yml` | ✅ Executor example |
+| `/home/user/kestra/docker-compose.worker-example.yml` | ✅ Worker + Executor example |
+| `/home/user/kestra/docker-compose.scheduler-example.yml` | ✅ Scheduler + Executor + Worker example |
 
 ### Build Files
 | File | Purpose |
